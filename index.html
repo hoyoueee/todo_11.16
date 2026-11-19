@@ -1,0 +1,1487 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>vLLM 与 SGLang Hybrid KV Cache 调研</title>
+  <style>
+    :root {
+      color-scheme: light;
+      --page: #f6f7f9;
+      --paper: #ffffff;
+      --text: #20242a;
+      --muted: #667085;
+      --line: #d9dee7;
+      --line-strong: #bcc5d2;
+      --soft: #f2f4f7;
+      --blue: #315f8c;
+      --blue-soft: #eaf2f9;
+      --green: #3c6e57;
+      --green-soft: #eaf4ef;
+      --amber: #855f22;
+      --amber-soft: #faf2df;
+      --code: #ffffff;
+      --code-text: #17202a;
+    }
+
+    * { box-sizing: border-box; }
+
+    html { scroll-behavior: smooth; }
+
+    body {
+      margin: 0;
+      background: var(--page);
+      color: var(--text);
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", "PingFang SC", Arial, sans-serif;
+      line-height: 1.72;
+    }
+
+    .page {
+      width: min(1120px, calc(100% - 40px));
+      margin: 28px auto 64px;
+      padding: 52px 64px 72px;
+      background: var(--paper);
+      border: 1px solid var(--line);
+      box-shadow: 0 8px 24px rgba(31, 38, 48, 0.06);
+    }
+
+    .document-header {
+      padding-bottom: 28px;
+      border-bottom: 1px solid var(--line);
+    }
+
+    h1, h2, h3, h4 { line-height: 1.35; font-weight: 600; color: #18202a; }
+    h1 { margin: 0 0 12px; font-size: 32px; letter-spacing: 0; }
+    h2 { margin: 56px 0 18px; padding-bottom: 10px; border-bottom: 1px solid var(--line); font-size: 25px; }
+    h3 { margin: 38px 0 12px; font-size: 20px; }
+    h4 { margin: 28px 0 10px; font-size: 17px; }
+    p { margin: 10px 0; }
+    ul, ol { padding-left: 24px; }
+    li + li { margin-top: 6px; }
+    strong { font-weight: 600; }
+    a { color: var(--blue); text-underline-offset: 3px; }
+    code { font-family: "Cascadia Code", "SFMono-Regular", Consolas, monospace; }
+    p code, li code, td code { padding: 2px 5px; border-radius: 3px; background: var(--soft); font-size: 0.93em; }
+
+    .subtitle { margin: 0; color: var(--muted); font-size: 16px; }
+    .meta { margin-top: 12px; color: var(--muted); font-size: 14px; }
+
+    .question-section { margin-top: 30px; }
+    .question-section h2 { margin-top: 0; border: 0; padding: 0; font-size: 21px; }
+    .question-list { display: grid; gap: 12px; margin-top: 14px; }
+    .question {
+      display: grid;
+      grid-template-columns: 34px 1fr;
+      gap: 12px;
+      align-items: start;
+      padding: 16px 18px;
+      border: 1px solid var(--line);
+      background: #fbfcfd;
+    }
+    .question-number {
+      display: grid;
+      place-items: center;
+      width: 30px;
+      height: 30px;
+      color: var(--paper);
+      background: #475467;
+      border-radius: 3px;
+      font-weight: 600;
+    }
+    .question p { margin: 1px 0 0; }
+
+    .terms {
+      margin-top: 18px;
+      padding: 13px 16px;
+      border-left: 3px solid var(--line-strong);
+      background: var(--soft);
+      color: #3d4652;
+      font-size: 14px;
+    }
+
+    .section-summary {
+      margin: 16px 0 24px;
+      padding: 15px 18px;
+      border-left: 4px solid var(--blue);
+      background: var(--blue-soft);
+    }
+    .section-summary p { margin: 5px 0; }
+
+    .architecture-figure {
+      margin: 24px 0 34px;
+      padding: 18px;
+      border: 1px solid var(--line);
+      background: #fcfcfd;
+    }
+    .architecture-figure figcaption { display: flex; flex-direction: column; gap: 2px; margin-bottom: 12px; }
+    .architecture-figure figcaption strong { font-size: 17px; }
+    .architecture-figure figcaption span, .figure-note { color: var(--muted); font-size: 14px; }
+    .architecture-figure svg { display: block; width: 100%; height: auto; }
+    .figure-note { margin: 10px 2px 0; }
+
+    .diagram-root { fill: #eef1f5; stroke: #aeb8c5; stroke-width: 1.5; }
+    .node-title { font-size: 20px; font-weight: 600; fill: #1f2937; }
+    .connector { fill: none; stroke: #718096; stroke-width: 1.7; }
+    .group-box { stroke-width: 1.5; }
+    .group-a { fill: #f2f7fb; stroke: #9db8d0; }
+    .group-b { fill: #f1f7f3; stroke: #9dbda9; }
+    .group-title { font-size: 18px; font-weight: 600; fill: #25303c; }
+    .group-note { font-size: 13px; fill: #667085; }
+    .block-box { fill: #ffffff; stroke: #bbc5d1; stroke-width: 1.2; }
+    .block-muted { fill: #f7f8fa; }
+    .block-title { font-size: 15px; font-weight: 600; fill: #344054; }
+    .payload { stroke-width: 1; }
+    .payload-a { fill: #dfeef8; stroke: #8bb1cd; }
+    .payload-b { fill: #e2f0e7; stroke: #8eb39b; }
+    .payload-label { font-size: 14px; font-weight: 600; fill: #27313d; }
+    .payload-sub { font-size: 11px; fill: #596575; }
+    .ellipsis { font-size: 28px; fill: #98a2b3; }
+    .id-source { fill: #ffffff; stroke: #aeb8c5; stroke-width: 1.2; }
+    .id-row { font-size: 16px; font-weight: 600; fill: #315f8c; }
+    .logical-unit { fill: #ffffff; stroke-width: 2; }
+    .logical-a { stroke: #6f9fc3; }
+    .logical-b { stroke: #72a184; }
+    .logical-title { font-size: 16px; font-weight: 600; fill: #25303c; }
+    .unit-note { font-size: 12px; fill: #667085; }
+    .mode-panel { stroke-width: 1.5; }
+    .default-panel { fill: #f7f9fc; stroke: #9db8d0; }
+    .unified-panel { fill: #f4f8f5; stroke: #9dbda9; }
+    .tensor-frame { fill: #ffffff; stroke: #aeb8c5; stroke-width: 1.2; }
+    .tensor-label { font-size: 14px; font-weight: 600; fill: #344054; }
+    .slot-box { fill: #f3f5f7; stroke: #bbc5d1; stroke-width: 1; }
+    .slot-selected { fill: #dfeef8; stroke: #5f91b6; stroke-width: 1.5; }
+    .slot-label { font-size: 12px; font-weight: 600; fill: #344054; }
+    .shared-id-band { fill: rgba(49, 95, 140, 0.06); stroke: #5f91b6; stroke-width: 1.5; stroke-dasharray: 6 5; }
+    .band-label { font-size: 13px; font-weight: 600; fill: #315f8c; }
+    .unified-entry { fill: #ffffff; stroke: #8eb39b; stroke-width: 1.5; }
+    .selected-entry { stroke: #3c6e57; stroke-width: 2.5; }
+    .matrix-head { font-size: 13px; font-weight: 600; fill: #344054; }
+    .page-row { fill: #ffffff; stroke: #aeb8c5; stroke-width: 1.2; }
+    .page-row-selected { stroke: #5f91b6; stroke-width: 2.2; }
+    .page-row-muted { fill: #f7f8fa; }
+    .page-id { font-size: 15px; font-weight: 600; fill: #315f8c; }
+    .row-brace { font-size: 12px; font-weight: 600; fill: #667085; }
+
+    blockquote {
+      margin: 16px 0;
+      padding: 8px 16px;
+      border-left: 3px solid var(--line-strong);
+      color: var(--muted);
+      background: var(--soft);
+    }
+
+    pre {
+      margin: 0;
+      padding: 17px 19px;
+      overflow: auto;
+      color: var(--code-text);
+      background: var(--code);
+      border: 1px solid var(--line);
+      border-radius: 0 0 4px 4px;
+      line-height: 1.55;
+      tab-size: 4;
+    }
+    pre code { font-size: 13px; }
+    pre code.language-text { color: var(--code-text); }
+    .explanation-comment {
+      display: block;
+      margin: 0 -9px;
+      padding: 1px 9px;
+      color: #8a3f0a;
+      background: #fff0c2;
+      border-left: 4px solid #d97706;
+      font-weight: 600;
+    }
+
+    details.code-proof, details.evidence-details {
+      margin: 14px 0 20px;
+      border: 1px solid var(--line);
+      border-radius: 4px;
+      background: #fbfcfd;
+    }
+    details.evidence-bundle { margin-top: 10px; }
+    .evidence-bundle .evidence-content h4 { margin-top: 28px; }
+    details.layout-bundle { margin-top: 10px; }
+    .layout-bundle .evidence-details { margin-left: 0; margin-right: 0; }
+    details.code-proof summary, details.evidence-details summary {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 16px;
+      padding: 12px 14px;
+      color: #344054;
+      font-weight: 600;
+      cursor: pointer;
+      list-style-position: inside;
+    }
+    details.code-proof[open] summary, details.evidence-details[open] > summary { border-bottom: 1px solid var(--line); }
+    details.evidence-details { padding-bottom: 2px; }
+    details.evidence-details > :not(summary) { margin-inline: 14px; }
+    details.evidence-details > :last-child { margin-bottom: 14px; }
+    .evidence-summary { margin: 8px 0 12px; color: #3d4652; }
+    .evidence-summary strong { color: #25364a; }
+    .source-proof { margin: 14px 0 20px; }
+    .source-proof .source-path { margin: 0 0 6px; }
+    .source-path { color: var(--muted); font-size: 12px; font-weight: 400; text-align: right; overflow-wrap: anywhere; }
+    .source-path code { background: transparent; padding: 0; }
+
+    body > pre, .page > pre { margin: 14px 0 20px; border-radius: 4px; }
+
+    table { width: 100%; border-collapse: collapse; margin: 18px 0 28px; font-size: 14px; }
+    th, td { padding: 11px 12px; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+    th { background: var(--soft); font-weight: 600; }
+
+    hr { margin: 42px 0; border: 0; border-top: 1px solid var(--line); }
+
+    .eviction-conclusion {
+      margin-top: 18px;
+      padding: 18px 20px;
+      border: 1px solid #d5c39b;
+      background: var(--amber-soft);
+    }
+    .eviction-conclusion strong { color: #684812; }
+    .eviction-conclusion table { margin: 0; }
+    .eviction-conclusion th { background: rgba(133, 95, 34, 0.08); }
+
+    .footer-note { margin-top: 48px; padding-top: 18px; border-top: 1px solid var(--line); color: var(--muted); font-size: 13px; }
+
+    @media (max-width: 820px) {
+      .page { width: 100%; margin: 0; padding: 30px 22px 48px; border: 0; box-shadow: none; }
+      h1 { font-size: 27px; }
+      h2 { font-size: 22px; margin-top: 44px; }
+      .architecture-figure { padding: 10px; margin-inline: -8px; overflow-x: auto; }
+      .architecture-figure svg { min-width: 760px; }
+      details.code-proof summary { align-items: flex-start; flex-direction: column; gap: 4px; }
+      .source-path { text-align: left; }
+    }
+
+    @media print {
+      body { background: white; }
+      .page { width: 100%; margin: 0; padding: 0; border: 0; box-shadow: none; }
+      details.code-proof:not([open]) > *:not(summary) { display: block; }
+      details.code-proof summary { border-bottom: 1px solid var(--line); }
+      .architecture-figure { break-inside: avoid; }
+    }
+  </style>
+</head>
+<body>
+  <main class="page">
+    <header class="document-header">
+      <h1>vLLM 与 SGLang Hybrid KV Cache</h1>
+      <p class="subtitle">逻辑 block/page 的多层组织方式与分层驱逐可行性</p>
+      <p class="meta">基于本地源码调研 · 2026-11-18</p>
+
+      <section class="question-section" aria-labelledby="main-questions">
+        <h2 id="main-questions">主要问题</h2>
+        <div class="question-list">
+          <div class="question">
+            <span class="question-number">1</span>
+            <p><strong>块内部到底覆盖什么？</strong>vLLM 的一个逻辑 block、SGLang 的一个逻辑 page/slot，是只属于某一层，还是共同覆盖多层 cache payload？</p>
+          </div>
+          <div class="question">
+            <span class="question-number">2</span>
+            <p><strong>能否只驱逐部分层？</strong>在现有编号、匹配和 ownership 结构下，能否保留同一 block/page 中部分层的 cache，只释放另外一些层？</p>
+          </div>
+        </div>
+        <div class="terms">
+          <strong>本文口径：</strong>逻辑 block/page 指 manager、block table、请求映射或前缀匹配使用的编号对象；layer payload 指该编号在某一层对应的 K/V、latent 或 recurrent state。物理地址是否连续不是判断逻辑边界的依据。
+        </div>
+      </section>
+    </header>
+
+    <h2 id="vllm-block-cache-group-block-block">vLLM：逻辑 block 是 cache group 的 block，不是单层 block</h2>
+<div class="section-summary">
+  <p><strong>核心：</strong>vLLM 的逻辑 block 属于 cache group。group 内所有层复用同一个 block ID / slot mapping，各层分别把自己的 K/V 写入该 ID 对应的位置。</p>
+  <p>因此，一个逻辑 block 可表示为 <code>{cache(layer_0, b), cache(layer_1, b), ...}</code>。block-outer 与 layer-outer 只改变这些 payload 的物理排列。</p>
+</div>
+<figure class="architecture-figure" aria-labelledby="vllm-diagram-title">
+  <figcaption id="vllm-diagram-title">
+    <strong>vLLM 逻辑层次</strong>
+    <span>cache group 直接管理逻辑 block；每个 block 是该 group 多层 payload 的共同逻辑单位。</span>
+  </figcaption>
+  <svg viewBox="0 0 1120 610" role="img" aria-labelledby="vllm-svg-title vllm-svg-desc">
+    <title id="vllm-svg-title">vLLM cache group、block 与 layer cache 的层次结构</title>
+    <desc id="vllm-svg-desc">两个 cache group 分别维护 block ID。每个逻辑 block 画成一个整体容器，内部列出该 group 中多个不一定连续的 layer cache payload。</desc>
+    <defs>
+      <marker id="v-arrow" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto">
+        <path d="M0,0 L8,4 L0,8 Z" fill="#718096" />
+      </marker>
+    </defs>
+
+    <g transform="translate(20 20)">
+      <rect class="group-box group-a" width="1080" height="280" rx="6" />
+      <text class="group-title" x="24" y="34">Cache group 0</text>
+      <text class="group-note" x="24" y="57">一套逻辑 block ID；group 中的层可以不连续：Layer 0 / 4 / 8</text>
+
+      <rect class="id-source" x="28" y="88" width="180" height="150" rx="5" />
+      <text class="block-title" x="118" y="117" text-anchor="middle">group 0 block IDs</text>
+      <text class="id-row" x="118" y="151" text-anchor="middle">0</text>
+      <text class="id-row" x="118" y="181" text-anchor="middle">1</text>
+      <text class="id-row" x="118" y="211" text-anchor="middle">…</text>
+      <path class="connector" marker-end="url(#v-arrow)" d="M208 145 L257 145" />
+      <path class="connector" marker-end="url(#v-arrow)" d="M208 180 L652 180" />
+
+      <g transform="translate(270 77)">
+        <rect class="logical-unit logical-a" width="350" height="178" rx="5" />
+        <text class="logical-title" x="175" y="29" text-anchor="middle">逻辑 Block 0（一个整体）</text>
+        <rect class="payload payload-a" x="18" y="54" width="96" height="88" rx="4" />
+        <text class="payload-label" x="66" y="86" text-anchor="middle">Layer 0</text>
+        <text class="payload-sub" x="66" y="109" text-anchor="middle">cache(0, 0)</text>
+        <rect class="payload payload-a" x="127" y="54" width="96" height="88" rx="4" />
+        <text class="payload-label" x="175" y="86" text-anchor="middle">Layer 4</text>
+        <text class="payload-sub" x="175" y="109" text-anchor="middle">cache(4, 0)</text>
+        <rect class="payload payload-a" x="236" y="54" width="96" height="88" rx="4" />
+        <text class="payload-label" x="284" y="86" text-anchor="middle">Layer 8</text>
+        <text class="payload-sub" x="284" y="109" text-anchor="middle">cache(8, 0)</text>
+        <text class="unit-note" x="175" y="164" text-anchor="middle">同一个 block ID 0 覆盖三层 payload</text>
+      </g>
+
+      <g transform="translate(665 77)">
+        <rect class="logical-unit logical-a" width="350" height="178" rx="5" />
+        <text class="logical-title" x="175" y="29" text-anchor="middle">逻辑 Block 1（一个整体）</text>
+        <rect class="payload payload-a" x="18" y="54" width="96" height="88" rx="4" />
+        <text class="payload-label" x="66" y="86" text-anchor="middle">Layer 0</text>
+        <text class="payload-sub" x="66" y="109" text-anchor="middle">cache(0, 1)</text>
+        <rect class="payload payload-a" x="127" y="54" width="96" height="88" rx="4" />
+        <text class="payload-label" x="175" y="86" text-anchor="middle">Layer 4</text>
+        <text class="payload-sub" x="175" y="109" text-anchor="middle">cache(4, 1)</text>
+        <rect class="payload payload-a" x="236" y="54" width="96" height="88" rx="4" />
+        <text class="payload-label" x="284" y="86" text-anchor="middle">Layer 8</text>
+        <text class="payload-sub" x="284" y="109" text-anchor="middle">cache(8, 1)</text>
+        <text class="unit-note" x="175" y="164" text-anchor="middle">同一个 block ID 1 覆盖三层 payload</text>
+      </g>
+    </g>
+
+    <g transform="translate(20 325)">
+      <rect class="group-box group-b" width="1080" height="245" rx="6" />
+      <text class="group-title" x="24" y="34">Cache group 1</text>
+      <text class="group-note" x="24" y="57">另一套独立 block IDs；示例层为 Layer 3 / 7</text>
+
+      <rect class="id-source" x="28" y="84" width="180" height="125" rx="5" />
+      <text class="block-title" x="118" y="113" text-anchor="middle">group 1 block IDs</text>
+      <text class="id-row" x="118" y="149" text-anchor="middle">0　　1　　…</text>
+      <path class="connector" marker-end="url(#v-arrow)" d="M208 147 L257 147" />
+      <path class="connector" marker-end="url(#v-arrow)" d="M208 168 L652 168" />
+
+      <g transform="translate(270 76)">
+        <rect class="logical-unit logical-b" width="350" height="146" rx="5" />
+        <text class="logical-title" x="175" y="29" text-anchor="middle">逻辑 Block 0（一个整体）</text>
+        <rect class="payload payload-b" x="44" y="52" width="116" height="68" rx="4" />
+        <text class="payload-label" x="102" y="80" text-anchor="middle">Layer 3</text>
+        <text class="payload-sub" x="102" y="102" text-anchor="middle">cache(3, 0)</text>
+        <rect class="payload payload-b" x="190" y="52" width="116" height="68" rx="4" />
+        <text class="payload-label" x="248" y="80" text-anchor="middle">Layer 7</text>
+        <text class="payload-sub" x="248" y="102" text-anchor="middle">cache(7, 0)</text>
+      </g>
+
+      <g transform="translate(665 76)">
+        <rect class="logical-unit logical-b" width="350" height="146" rx="5" />
+        <text class="logical-title" x="175" y="29" text-anchor="middle">逻辑 Block 1（一个整体）</text>
+        <rect class="payload payload-b" x="44" y="52" width="116" height="68" rx="4" />
+        <text class="payload-label" x="102" y="80" text-anchor="middle">Layer 3</text>
+        <text class="payload-sub" x="102" y="102" text-anchor="middle">cache(3, 1)</text>
+        <rect class="payload payload-b" x="190" y="52" width="116" height="68" rx="4" />
+        <text class="payload-label" x="248" y="80" text-anchor="middle">Layer 7</text>
+        <text class="payload-sub" x="248" y="102" text-anchor="middle">cache(7, 1)</text>
+      </g>
+    </g>
+  </svg>
+  <p class="figure-note">vLLM 图把逻辑 block 画成明确的跨层容器：block ID 属于 group，块内是该 group 各层在同一 ID 下的 payload；物理 outer layout 不改变这个逻辑整体。</p>
+</figure>
+<h3 id="block-cache-group">block 只按 cache group 分配一次</h3>
+<p class="evidence-summary"><strong>简要：</strong>每个 cache group 申请自己的逻辑 block；manager 不按层重复分配。</p>
+<details class="evidence-details">
+  <summary>展开说明与源码证明（2 处）</summary>
+
+<p>vLLM 为每个 <code>kv_cache_group</code> 创建一个 manager，而不是为 group 中的每个 layer 创建 manager。</p>
+<p>group manager 申请 block 时也没有遍历 layer，只从 <code>BlockPool</code> 申请一次 <code>KVCacheBlock</code> 对象序列。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/core/single_type_kv_cache_manager.py:505-515</code></div>
+  <pre><code class="language-python">req_blocks = self.req_to_blocks[request_id]
+num_required_blocks = cdiv(num_tokens, self.block_size)
+num_new_blocks = num_required_blocks - len(req_blocks)
+if num_new_blocks &lt;= 0:
+    return cow_blocks
+else:
+<span class="explanation-comment">    # 【说明】这里没有 for layer；得到的是 group-level blocks。</span>
+    new_blocks = self.block_pool.get_new_blocks(num_new_blocks)
+    req_blocks.extend(new_blocks)
+    if self._record_new_block_ids:
+        self.new_block_ids.extend(b.block_id for b in new_blocks)
+    return cow_blocks + new_blocks
+</code></pre>
+</div>
+<p><code>BlockPool</code> 自身也只有一维 <code>blocks[block_id]</code>，没有 layer 维度。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/core/block_pool.py:139-153</code></div>
+  <pre><code class="language-python">self.num_gpu_blocks = num_gpu_blocks
+self.medium = medium
+self.enable_caching = enable_caching
+self.hash_block_size = hash_block_size
+self.num_hash_lookahead_tokens = num_hash_lookahead_tokens
+self._weak_self = weakref.ref(self)
+
+<span class="explanation-comment"># 【说明】唯一索引是 block_id，不存在 blocks[layer_id][block_id]。</span>
+self.blocks: list[KVCacheBlock] = [
+    KVCacheBlock(idx, pool=self._weak_self) for idx in range(num_gpu_blocks)
+]
+self.free_block_queue = FreeKVCacheBlockQueue(self.blocks)
+</code></pre>
+</div>
+
+</details><h3 id="group-block-id-group-layer">同一个 group block ID 被送给 group 中所有 layer</h3>
+<p class="evidence-summary"><strong>简要：</strong>同组各层使用相同 block/slot 映射，而不是各自维护独立编号。</p>
+<details class="evidence-details">
+  <summary>展开说明与源码证明（3 处）</summary>
+
+<p>worker 端按 group 取得一份 <code>slot_mapping</code>，然后将同一个 tensor 对象赋给该 group 的所有 layer。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/worker/gpu/attn_utils.py:453-461</code></div>
+  <pre><code class="language-python">def build_slot_mappings_by_layer(
+    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
+) -&gt; dict[str, torch.Tensor]:
+    slot_mappings_by_layer: dict[str, torch.Tensor] = {}
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+
+<span class="explanation-comment">    # 【说明】外层一项对应一个 cache group 的逻辑 block/slot 映射。</span>
+    for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
+<span class="explanation-comment">        # 【说明】group 内所有 layer 复用同一份 mapping。</span>
+        for layer_name in kv_cache_group.layer_names:
+            slot_mappings_by_layer[layer_name] = slot_mapping
+    return slot_mappings_by_layer
+</code></pre>
+</div>
+<p>正常 GPU model runner 确实执行这一步。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/worker/gpu/model_runner.py:2040-2044</code></div>
+  <pre><code class="language-python">elif not (dummy_run and skip_attn_for_dummy_run):
+    assert slot_mappings is not None
+<span class="explanation-comment">    # 【说明】将 group-level mapping 展开给各层 forward。</span>
+    slot_mappings_by_layer = build_slot_mappings_by_layer(
+        slot_mappings, self.kv_cache_config
+    )
+</code></pre>
+</div>
+<p>同样，attention metadata 也是每个 group 只选择一份 block table 和 slot mapping。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/worker/gpu/attn_utils.py:512-518, 540-550</code></div>
+  <pre><code class="language-python">num_kv_cache_groups = len(kv_cache_config.kv_cache_groups)
+for i in range(num_kv_cache_groups):
+    groups = groups_with_metadata_builders(attn_groups[i])
+    if not groups:
+        continue
+
+<span class="explanation-comment">    # 【说明】group i 只有一份逻辑 block table 与 slot mapping。</span>
+    block_table = block_tables[i]
+    slot_mapping = slot_mappings[i]
+
+    common_attn_metadata = CommonAttentionMetadata(
+        query_start_loc=query_start_loc_gpu,
+        query_start_loc_cpu=query_start_loc_cpu,
+        seq_lens=seq_lens,
+        max_seq_len=max_seq_len,
+        num_reqs=num_reqs,
+        num_actual_tokens=num_tokens,
+        max_query_len=max_query_len,
+        block_table_tensor=block_table,
+        slot_mapping=slot_mapping,
+        causal=group_causal,
+    )
+</code></pre>
+</div>
+<p>以上代码共同排除了“每层独立逻辑 block、编号碰巧相同”的解释：</p>
+<pre><code class="language-text">实际结构：
+
+group-level KVCacheBlock(id=b)
+    ├── layer A 使用 b 定位自己的 payload
+    ├── layer B 使用 b 定位自己的 payload
+    └── layer C 使用 b 定位自己的 payload
+</code></pre>
+
+</details><h3 id="vllm-block">一个 vLLM 逻辑 block 的内容</h3>
+
+<p>对于一个 cache group，逻辑 block <code>b</code> 可以写成：</p>
+<pre><code class="language-text">logical_block(b)
+= {
+    cache(layer_0, b),
+    cache(layer_1, b),
+    ...,
+    cache(layer_n, b)
+  }
+</code></pre>
+<p>这不是只根据注释推导出的抽象。下面的实际执行链会把 group 内多个 layer 的 <code>cache(layer, b)</code> 都落到同一个逻辑 block 编号 <code>b</code> 下。</p>
+
+<p class="evidence-summary"><strong>简要：</strong>三段证据连成一条链：同组 layers 共享逻辑 block/slot，各层使用自己的 cache view 分别写入对应 payload。</p>
+<details class="evidence-details evidence-bundle">
+  <summary>展开完整说明与源码证明（连续编号 1–3）</summary>
+  <div class="evidence-content">
+<h4 id="backing-allocation-view-view-block">代码证据 1：同一 backing allocation 被切成每层 view，且每个 view 都保留 block 维</h4>
+<p class="evidence-summary"><strong>简要：</strong>同组多层被放入同一个 backing allocation；切出的每层 view 仍用同一逻辑 block 维度索引。</p>
+
+  <div class="evidence-content">
+
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/kv_cache_interface.py:358-423</code></div>
+  <pre><code class="language-python">def create_kv_cache_views(
+    raw: torch.Tensor,
+    spec: KVCacheSpec,
+    num_blocks: int,
+    layout: KVCacheLayout,
+    kv_cache_tensor: KVCacheTensor,
+    kernel_block_size: int | None = None,
+) -&gt; list[torch.Tensor]:
+    num_layers = len(kv_cache_tensor.layers)
+    layer_stride = kv_cache_tensor.layer_stride
+    block_stride = kv_cache_tensor.block_stride
+    shape_bytes = compute_layer_kv_cache_shape_bytes(
+        spec, num_blocks, kernel_block_size
+    )
+
+<span class="explanation-comment">    # 【说明】这里的 logical_shape 是 tensor 的规范坐标轴形状，
+    # 不是“一个 manager 逻辑 block 的内部 shape”。它同时保留 L、B 两个轴。</span>
+    logical_shape = (num_layers, *shape_bytes)
+    strides = compute_layout_strides(
+        spec,
+        num_blocks,
+        num_layers,
+        layout,
+        kernel_block_size,
+        fixed_strides=(layer_stride, block_stride, None, None, None),
+    )
+    dtype = getattr(spec, &quot;dtype&quot;, None)
+
+    view_5d = torch.as_strided(
+        raw,
+        size=logical_shape,
+        stride=strides,
+        storage_offset=raw.storage_offset() + kv_cache_tensor.offset,
+    )
+
+    views = []
+    for layer_idx in range(num_layers):
+<span class="explanation-comment">        # 【说明】每个 layer 得到 view_5d[layer_idx]；该 view 的第一维
+        # 仍然是 block 维，因此 view_5d[layer_idx][b] 就是 cache(layer, b)。</span>
+        cache_logical = view_5d[layer_idx]
+        if dtype is not None:
+            cache_logical = cache_logical.view(dtype)
+        views.append(cache_logical)
+    return views
+</code></pre>
+</div>
+<p>这些 view 随后按 <code>tensor.layers</code> 的同一顺序绑定到对应层。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/worker/utils.py:623-639, 952-962</code></div>
+  <pre><code class="language-python">kv_caches: dict[str, torch.Tensor] = {}
+for tensor in kv_cache_config.kv_cache_tensors:
+    group_id, spec = layer_spec_for_tensor(kv_cache_config, tensor)
+    if not spec.has_layer_views:
+        kv_caches.update((name, buf) for name in tensor.layers)
+        continue
+
+    views = create_kv_cache_views(
+        buf,
+        spec,
+        kv_cache_config.num_blocks_of(tensor),
+        layout,
+        tensor,
+        kernel_block_size=layer_kernel_block_size(group_id, kernel_block_sizes),
+    )
+<span class="explanation-comment">    # 【说明】tensor.layers[i] 对应 views[i]，即每层取得自己的 [B, ...] view。</span>
+    kv_caches.update(zip(tensor.layers, views))
+
+
+def bind_kv_cache_to_layers(
+    kv_caches: dict[str, torch.Tensor],
+    forward_context: dict[str, Attention],
+) -&gt; None:
+    for layer_name, kv_cache in kv_caches.items():
+<span class="explanation-comment">        # 【说明】把该层的 [B, ...] view 绑定到该层实例。</span>
+        forward_context[layer_name].bind_kv_cache(kv_cache)
+</code></pre>
+</div>
+
+  </div>
+<h4 id="group-slot">代码证据 2：group 内所有层取得完全相同的 slot 编号</h4>
+<p class="evidence-summary"><strong>简要：</strong>同一 cache group 的各层取得相同 slot mapping，因此 block ID 和 block 内位置一致。</p>
+
+  <div class="evidence-content">
+
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/worker/gpu/attn_utils.py:453-461</code></div>
+  <pre><code class="language-python">def build_slot_mappings_by_layer(
+    slot_mappings: torch.Tensor, kv_cache_config: KVCacheConfig
+) -&gt; dict[str, torch.Tensor]:
+    slot_mappings_by_layer: dict[str, torch.Tensor] = {}
+    kv_cache_groups = kv_cache_config.kv_cache_groups
+
+    for slot_mapping, kv_cache_group in zip(slot_mappings, kv_cache_groups):
+        for layer_name in kv_cache_group.layer_names:
+<span class="explanation-comment">            # 【说明】这里没有为各 layer 重新计算 block/page ID；
+            # group 内每个 layer 都引用同一个 slot_mapping tensor。</span>
+            slot_mappings_by_layer[layer_name] = slot_mapping
+    return slot_mappings_by_layer
+</code></pre>
+</div>
+<p>其中一个 token 的 slot 由 group 的 block table 计算为：</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/worker/gpu/block_table.py:415-427</code></div>
+  <pre><code class="language-python">block_indices = tl.where(mapping_enabled, local_positions // kv_block_size, 0)
+block_offsets = local_positions % kv_block_size
+block_numbers = tl.load(
+    block_table_ptr + req_state_idx * block_table_stride + block_indices,
+    mask=is_local &amp; is_real_req,
+    other=0,
+)
+
+<span class="explanation-comment"># 【说明】slot_id = 逻辑/物理 block 编号 * block_size + block 内偏移。
+# 这份 slot_ids 随后被复用给 group 内所有 layer。</span>
+slot_ids = block_numbers * kv_block_size + block_offsets
+tl.store(slot_mapping_ptr + offset, slot_ids, mask=offset &lt; end_idx)
+</code></pre>
+</div>
+
+  </div>
+<h4 id="forward-slot-cache-view">代码证据 3：每层 forward 用相同 slot，写入自己的 cache view</h4>
+<p class="evidence-summary"><strong>简要：</strong>每层用自己的 cache view 和共享 slot，将本层 K/V 写入同一逻辑 block 位置。</p>
+
+  <div class="evidence-content">
+
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/model_executor/layers/attention/attention.py:752-793</code></div>
+  <pre><code class="language-python"><span class="explanation-comment"># 【说明】这是当前 layer 在代码证据 1 中绑定的 [B, ...] cache view。</span>
+kv_cache = attn_layer.kv_cache
+
+slot_mapping = forward_context.slot_mapping
+assert isinstance(slot_mapping, dict)
+
+<span class="explanation-comment"># 【说明】按 layer_name 取 mapping；但代码证据 2 表明，同组各层取到的是
+# 同一个 slot_mapping tensor，因此相同 token 会得到相同的 block b 和 offset。</span>
+layer_slot_mapping = slot_mapping.get(layer_name)
+
+attn_layer.impl.do_kv_cache_update(
+    attn_layer,
+    key,
+    value,
+    kv_cache,
+    layer_slot_mapping,
+)
+</code></pre>
+</div>
+<p>以 FlashAttention backend 为例，真正的写入调用如下。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/attention/backends/flash_attn.py:1406-1440</code></div>
+  <pre><code class="language-python">def do_kv_cache_update(
+    self,
+    layer: torch.nn.Module,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    kv_cache: torch.Tensor,
+    slot_mapping: torch.Tensor,
+) -&gt; None:
+<span class="explanation-comment">    # 【说明】kv_cache 是当前 layer 的 [B, ...] view。</span>
+    key_cache, value_cache = kv_cache.transpose(1, 2).split(
+        self.head_size, dim=-1
+    )
+
+    reshape_and_cache_flash(
+        key,
+        value,
+        key_cache,
+        value_cache,
+<span class="explanation-comment">        # 【说明】同组所有 layer 使用相同 slot_mapping，所以它们分别写入
+        # cache(layer_0, b)、cache(layer_1, b)……的相同 block/offset 位置。</span>
+        slot_mapping,
+        self.kv_cache_dtype,
+        layer._k_scale,
+        layer._v_scale,
+    )
+</code></pre>
+</div>
+<p>因此，源码中的实际过程可以严格对应为：</p>
+<pre><code class="language-text">同一个 group slot/block b
+    + layer_0 自己的 [B, ...] view -&gt; 写 cache(layer_0, b)
+    + layer_1 自己的 [B, ...] view -&gt; 写 cache(layer_1, b)
+    + ...
+    + layer_n 自己的 [B, ...] view -&gt; 写 cache(layer_n, b)
+
+= logical_block(b)
+</code></pre>
+<p>这里的“一个逻辑 block 包含多层 cache”表示这些 layer payload 共享同一个 group-level block 身份和生命周期；并不要求存在一个 Python <code>list</code>/<code>dict</code> 在一次函数调用中把所有层打包写入。模型 forward 本来就是逐层执行，所以实际写入也是各层分别发生。</p>
+<p>如果 group 中是 attention layers，每个 <code>cache(layer, b)</code> 通常是该层一个 token block 的 K/V；如果是 recurrent/state layer，则是对应 state payload。</p>
+<p>vLLM 没有创建一个 Python 容器把这些 layer payload装进去。这个多层逻辑对象由两件事隐式定义：</p>
+<ol>
+<li>manager 只分配一个 group-level block ID <code>b</code>；</li>
+<li>group 内所有 layer 都用 <code>b</code> 索引自己的 cache view。</li>
+</ol>
+
+  </div>
+
+  </div>
+</details><h3 id="block-outer-layer-outer">物理显存排布：block-outer 与 layer-outer 只改变物理展开顺序</h3>
+<p class="evidence-summary"><strong>简要：</strong>物理 block-outer 让同一逻辑 block 的多层物理 pages 相邻；物理 layer-outer 让同一 layer 的多个物理 pages 相邻。两者不改变逻辑 block。</p>
+<details class="evidence-details layout-bundle">
+  <summary>展开物理显存排布说明</summary>
+  <div class="evidence-content">
+
+<p>本节中的 <code>block-outer</code> 和 <code>layer-outer</code> 是 <strong>physical KV cache layout</strong>，不是两种不同的逻辑 block 管理方式。</p>
+<p>为避免混淆，下面明确区分：</p>
+<ul>
+<li><strong>逻辑 block <code>b</code></strong>：manager、block table、prefix match 使用的 group-level 编号。</li>
+<li><strong>物理 page <code>(layer, b)</code></strong>：某一层在逻辑 block <code>b</code> 下实际占用的 K/V 字节区域。</li>
+<li><strong>物理 block 区域</strong>：仅在 block-outer 排布下，用于描述同一 <code>b</code> 的多层物理 pages 在 backing memory 中形成的连续 byte range；它不是额外创建的 manager/block-table 对象。</li>
+</ul>
+<p>可以把 group cache 先理解成一个逻辑二维矩阵：</p>
+<pre><code class="language-text">                       逻辑 block 0    逻辑 block 1    逻辑 block 2
+layer A 的物理 page        A0              A1              A2
+layer B 的物理 page        B0              B1              B2
+layer C 的物理 page        C0              C1              C2
+</code></pre>
+<p>无论使用哪一种物理 layout，逻辑 block 始终是一列：</p>
+<pre><code class="language-text">logical block 0 = {物理 page A0, 物理 page B0, 物理 page C0}
+logical block 1 = {物理 page A1, 物理 page B1, 物理 page C1}
+logical block 2 = {物理 page A2, 物理 page B2, 物理 page C2}
+</code></pre>
+<h4 id="view">每层 view 的含义</h4>
+<p>vLLM 最终会为每一层提供一个按 block ID 索引的 cache view。执行到 layer A 时，两种 layout 下访问方式都是：</p>
+<pre><code class="language-python">layer_A_view[p]
+</code></pre>
+<p>它表示“layer A 在 group block ID <code>p</code> 下的物理 cache page”。两种模式的 view shape 和索引语义相同，通常都可理解为 <code>[B, H, N, C]</code>；不同的是底层 <code>storage_offset</code> 和 B 轴 stride：</p>
+<table>
+<thead>
+<tr>
+<th>per-layer view</th>
+<th>物理 block-outer</th>
+<th>物理 layer-outer</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>访问形式</td>
+<td><code>layer_A_view[p]</code></td>
+<td><code>layer_A_view[p]</code></td>
+</tr>
+<tr>
+<td>B 轴相邻项</td>
+<td>A0、A1 之间跨过其他层的 pages</td>
+<td>A0、A1 在 layer A 物理区内相邻</td>
+</tr>
+<tr>
+<td>B 轴 stride</td>
+<td>约为一个多层 packed 物理 block 区域</td>
+<td>约为一个物理 page</td>
+</tr>
+<tr>
+<td>同一 <code>p</code> 的多层 pages</td>
+<td>物理相邻</td>
+<td>物理分散</td>
+</tr>
+</tbody>
+</table>
+<p>因此，view 的“内容含义”没有改变；layout 改变的是 <code>layer_A_view[p]</code> 最终通过 stride 定位到 backing memory 的哪个物理地址。</p>
+<h4 id="block-outer-block-pages">物理 block-outer：同一逻辑 block 的多层物理 pages 相邻</h4>
+<pre><code class="language-text">backing memory：
+
+[A0 | B0 | C0] [A1 | B1 | C1] [A2 | B2 | C2]
+└物理 block 区域 0┘ └物理 block 区域 1┘ └物理 block 区域 2┘
+</code></pre>
+<p>这里的“物理 block 区域 0”表示同一逻辑 block ID <code>0</code> 的多层 payload 恰好连续存放。它对应 <code>{A0, B0, C0}</code> 的连续显存范围，但逻辑所有权仍由 cache group 的 block <code>0</code> 决定。</p>
+<h4 id="layer-outer-pages">物理 layer-outer：每层自己的多个物理 pages 相邻</h4>
+<pre><code class="language-text">backing memory：
+
+[A0 | A1 | A2] [B0 | B1 | B2] [C0 | C1 | C2]
+└ layer A 物理区 ┘ └ layer B 物理区 ┘ └ layer C 物理区 ┘
+</code></pre>
+<p>此时不存在一个跨层连续的“物理 block 区域 0”。逻辑 block <code>0</code> 仍然是 <code>{A0, B0, C0}</code>，只是这三个物理 pages 分散在三个 layer 物理区中。</p>
+<p>因此：</p>
+<pre><code class="language-text">物理 block-outer：B 是外层物理轴，同一 b 的多层物理 pages 相邻。
+物理 layer-outer：L 是外层物理轴，同一 layer 的多个物理 pages 相邻。
+
+二者都不改变逻辑 block 的编号、匹配粒度、覆盖层集合和驱逐边界。
+</code></pre>
+<h4 id="layout">源码解释：layout 如何真正变成物理显存地址</h4>
+<p class="evidence-summary"><strong>简要：</strong>本节给出对应实现路径与源码依据。</p>
+<details class="evidence-details">
+  <summary>展开说明和源码证明（3 处）</summary>
+  <div class="evidence-content">
+
+<p>第一步，layout enum 明确声明自己描述的是 physical order。源码所说的 “logical shape <code>[L, B, H, N, C]</code>” 是 <strong>tensor 的规范坐标轴顺序</strong>，不是“一个 manager 逻辑 block 按 L→B 组织”。</p>
+<p>这两个概念应写成：</p>
+<pre><code class="language-text">tensor 规范坐标：view_5d[layer_id, block_id, ...]，轴名固定为 [L, B, H, N, C]
+
+manager 逻辑 block b：
+    {view_5d[0, b, ...], view_5d[1, b, ...], ..., view_5d[L-1, b, ...]}
+    等价记法：view_5d[:, b, ...]
+</code></pre>
+<p>因此 <code>[L, B, ...]</code> 中 L 写在 B 前面，只是在声明索引参数的顺序；它既不表示 L 是 manager 的上层对象，也不表示每层拥有独立逻辑 block。manager 如何把固定 <code>b</code> 解释为跨层逻辑 block，来自前文已经证明的 group-level block ID 和共享 slot mapping。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/kv_cache_layout.py:15-32, 56-58</code></div>
+  <pre><code class="language-python">class KVCacheLayout(Enum):
+    &quot;&quot;&quot;Physical layout descriptor for a KV cache group.
+
+    The logical shape is always [L, B, H, N, &lt;content&gt;].
+    Each member's value is a stride permutation that maps logical axes
+    to physical (memory) order.
+    &quot;&quot;&quot;
+
+<span class="explanation-comment">    # 【说明】上游 docstring 中的 logical shape 指 tensor 坐标轴，
+    # 不指 cache manager 的 logical block ownership。</span>
+
+<span class="explanation-comment">    # 【说明】L 在物理外层：一个 layer 的多个 B 位置先连续排列。</span>
+    LBNHC = (0, 1, 3, 2, 4)  # [L, B, N, H, C]
+
+<span class="explanation-comment">    # 【说明】B 在物理外层：一个 block ID 的多个 layer pages 先排列。</span>
+    BLNHC = (1, 0, 3, 2, 4)  # [B, L, N, H, C]
+
+    @property
+    def stride_order(self) -&gt; tuple[int, ...]:
+        return self.value
+
+    @property
+    def is_block_outermost(self) -&gt; bool:
+        return self.value[0] == _DIM_B
+</code></pre>
+</div>
+<p>第二步，<code>compute_layout_strides()</code> 按物理轴顺序从内向外计算每个 <strong>tensor 坐标轴</strong> 的 byte stride。它始终保留相同的 <code>L</code> 和 <code>B</code> 两个索引轴，只改变 <code>(l, b)</code> 映射到哪个物理地址，因此得到不同的 <code>layer_stride</code> 与 <code>block_stride</code>。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/kv_cache_interface.py:317-355</code></div>
+  <pre><code class="language-python">def compute_layout_strides(
+    spec: KVCacheSpec,
+    num_blocks: int,
+    num_layers: int,
+    layout: KVCacheLayout,
+    kernel_block_size: int | None = None,
+    fixed_strides: tuple[int | None, ...] = (None,) * 5,
+) -&gt; tuple[int, ...]:
+<span class="explanation-comment">    # 【说明】这是 tensor 的规范坐标 shape [L, B, H, N, C]；
+    # manager 逻辑 block b 对应固定 B=b、遍历所有 L 的切片。</span>
+    shape = (
+        num_layers,
+        *compute_layer_kv_cache_shape_bytes(spec, num_blocks, kernel_block_size),
+    )
+
+<span class="explanation-comment">    # 【说明】只有物理遍历顺序由 LBNHC / BLNHC 等 layout 决定。</span>
+    order = layout.stride_order
+
+    strides = [0] * 5
+    current_stride = 1
+    for physical_idx, dim in reversed(tuple(enumerate(order))):
+        if padded_page_size is not None and physical_idx == page_grid_end - 1:
+            current_stride = max(current_stride, padded_page_size)
+            assert current_stride % padded_page_size == 0
+        strides[dim] = fixed_strides[dim] or current_stride
+        current_stride = strides[dim] * shape[dim]
+    return tuple(strides)
+</code></pre>
+</div>
+<p>忽略 page 内部的 <code>H/N/C</code> 细节后，上述循环得到的关键关系是：</p>
+<pre><code class="language-text">物理 block-outer / BLNHC：
+    layer_stride ≈ one_page_bytes
+    block_stride ≈ num_layers × one_page_bytes
+    address(layer=l, block=b) ≈ base + b×block_stride + l×layer_stride
+
+物理 layer-outer / LBNHC：
+    block_stride ≈ one_page_bytes
+    layer_stride ≈ num_blocks × one_page_bytes
+    address(layer=l, block=b) ≈ base + l×layer_stride + b×block_stride
+</code></pre>
+<p>第三步，实际分配代码把这两个 stride 保存进 <code>KVCacheTensor</code>，再由 <code>torch.as_strided()</code> 在同一个 raw backing allocation 上建立可按 <code>(layer_id, block_id)</code> 访问的五维 tensor view。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/core/kv_cache_planning.py:650-664</code>；<code>sources/vllm/vllm/v1/kv_cache_interface.py:399-423</code></div>
+  <pre><code class="language-python">layer_stride, block_stride, _, _, _ = compute_layout_strides(
+    spec,
+    num_blocks,
+    len(layer_names),
+    layout,
+    fixed_strides=(None, block_stride, None, None, None),
+)
+kv_cache_tensors.append(
+    KVCacheTensor(
+        size=size,
+        layers=layer_names,
+        layer_stride=layer_stride,
+        block_stride=block_stride,
+        offset=byte_offset,
+    )
+)
+
+<span class="explanation-comment"># 【说明】这里固定的是 tensor 坐标轴 [L, B, ...]，不是逻辑 block 的层次结构。
+# 对 manager 逻辑 block b，应观察 view_5d[:, b, ...] 这一跨层切片。</span>
+logical_shape = (num_layers, *shape_bytes)
+strides = compute_layout_strides(
+    spec,
+    num_blocks,
+    num_layers,
+    layout,
+    kernel_block_size,
+    fixed_strides=(layer_stride, block_stride, None, None, None),
+)
+view_5d = torch.as_strided(
+    raw,
+    size=logical_shape,
+    stride=strides,
+    storage_offset=raw.storage_offset() + kv_cache_tensor.offset,
+)
+
+views = []
+for layer_idx in range(num_layers):
+<span class="explanation-comment">    # 【说明】每层取得一个第一维为 B 的 cache view；不同层对同一个 b
+    # 的元素合在一起，才构成 group-level logical block b。</span>
+    cache_logical = view_5d[layer_idx]
+    views.append(cache_logical)
+</code></pre>
+</div>
+<p>这段执行代码把结论落实到了实际地址计算上：layout 改的是 <code>layer_stride</code> / <code>block_stride</code>，也就是物理 page 之间的距离。<code>view_5d</code> 只是统一的 tensor 坐标系；真正的 group-level 逻辑 block <code>b</code> 是其中固定 B、跨 L 的集合，且该 <code>b</code> 仍由共享的 group block ID / slot mapping 决定。</p>
+
+  </div>
+</details><h4 id="section">默认选择与使用倾向</h4>
+<p>在当前 vLLM 源码中，<strong>普通场景默认倾向使用物理 layer-outer</strong>。当 backend 没有声明特殊偏好时，通用布局优先级首先是 <code>LBNHC</code>，其次是 <code>LBHNC</code>，两者都属于 layer-outer；<code>BLNHC</code>、<code>BLHNC</code> 等 block-outer 排在其后。</p>
+<p>但这不是一个对所有模型和 backend 都固定不变的默认值。vLLM 启动时会汇总各 attention backend 支持且偏好的 layout，应用 Hybrid、DCP、speculative decoding 和 KV connector 等约束，最后选择共同候选中的第一项。因此：</p>
+<ul>
+<li>一般路径、无特殊约束：通常选择 <code>LBNHC</code> 等 layer-outer；</li>
+<li>特殊 backend 或混合 cache 约束：可能选择甚至强制使用 block-outer；</li>
+<li>实际运行结果：以启动日志 <code>Using &lt;layout&gt; KV cache layout.</code> 为准；也可通过 <code>VLLM_KV_CACHE_LAYOUT</code> 显式指定，但指定值必须受当前 backend 支持。</li>
+</ul>
+<p>对应源码：<code>sources/vllm/vllm/v1/attention/backends/utils.py</code> 中的 <code>_DEFAULT_LAYOUT_PREFERENCE</code> 与 <code>resolve_kv_cache_layout()</code>，以及 <code>sources/vllm/vllm/envs.py</code> 中默认值为 <code>None</code> 的 <code>VLLM_KV_CACHE_LAYOUT</code>。</p>
+
+  </div>
+</details><h3 id="hybrid-vllm-block">Hybrid 对 vLLM 逻辑 block 的影响</h3>
+<p>Hybrid 只影响“哪些层属于同一个 cache group”。一个逻辑 block 覆盖的是<strong>当前 group 中的层</strong>，不是必然覆盖模型所有层。</p>
+<pre><code class="language-text">group 0 logical block b
+= group 0 中所有 layer 的 b 号 payload
+
+group 1 logical block b
+= group 1 中所有 layer 的 b 号 payload
+</code></pre>
+<p>层类型会改变 payload 内容：</p>
+<ul>
+<li>attention layer：K/V 或量化后的 K/V 表示；</li>
+<li>MLA：latent/packed cache；</li>
+<li>Mamba/GDN/KDA：recurrent state。</li>
+</ul>
+<p>但 <code>block-outer</code> / <code>layer-outer</code> 不会改变 group-level logical block 的含义。</p>
+<hr />
+<h2 id="sglang-pageslot-id">SGLang：逻辑 page/slot ID 同样由多层共同使用</h2>
+<div class="section-summary">
+  <p><strong>核心：</strong>SGLang 的 page/slot ID 由 pool/sub-pool 分配一次，并由该范围内的多层共同使用。</p>
+  <p>因此，一个逻辑 page <code>p</code> 应理解为 <code>{payload(layer_0, p), payload(layer_1, p), ...}</code>。匹配、引用与释放面对的是这一跨层逻辑 page，而不是每层各自维护一套逻辑 page。</p>
+</div>
+<figure class="architecture-figure" aria-labelledby="sglang-diagram-title">
+  <figcaption id="sglang-diagram-title">
+    <strong>SGLang 逻辑 page/slot 层次</strong>
+    <span>每个 pool/sub-pool 管理一套 page IDs；一个逻辑 page 是同一 ID 在该 pool 多层上的 payload 集合。</span>
+  </figcaption>
+  <svg viewBox="0 0 1120 610" role="img" aria-labelledby="sglang-svg-title sglang-svg-desc">
+    <title id="sglang-svg-title">SGLang pool、逻辑 page ID 与多层 payload 的关系</title>
+    <desc id="sglang-svg-desc">每个 pool 有独立的 page ID 空间。矩阵中的每一行是一个逻辑 page，同一行跨越该 pool 管理的多个 layer payload。</desc>
+
+    <g transform="translate(20 20)">
+      <rect class="group-box group-a" width="1080" height="320" rx="6" />
+      <text class="group-title" x="24" y="36">Window / SWA pool</text>
+      <text class="group-note" x="24" y="61">独立 page ID 空间；示例层为 Layer 0 / 1 / 4</text>
+
+      <text class="matrix-head" x="352" y="92" text-anchor="middle">Layer 0 payload</text>
+      <text class="matrix-head" x="582" y="92" text-anchor="middle">Layer 1 payload</text>
+      <text class="matrix-head" x="812" y="92" text-anchor="middle">Layer 4 payload</text>
+
+      <g transform="translate(38 112)">
+        <rect class="page-row" width="1004" height="58" rx="4" />
+        <text class="page-id" x="90" y="35" text-anchor="middle">逻辑 Page 0</text>
+        <rect class="payload payload-a" x="230" y="9" width="168" height="40" rx="3" />
+        <text class="payload-label" x="314" y="34" text-anchor="middle">payload(0, 0)</text>
+        <rect class="payload payload-a" x="460" y="9" width="168" height="40" rx="3" />
+        <text class="payload-label" x="544" y="34" text-anchor="middle">payload(1, 0)</text>
+        <rect class="payload payload-a" x="690" y="9" width="168" height="40" rx="3" />
+        <text class="payload-label" x="774" y="34" text-anchor="middle">payload(4, 0)</text>
+        <text class="row-brace" x="930" y="35" text-anchor="middle">同一 ID 0</text>
+      </g>
+
+      <g transform="translate(38 180)">
+        <rect class="page-row page-row-selected" width="1004" height="58" rx="4" />
+        <text class="page-id" x="90" y="35" text-anchor="middle">逻辑 Page 1</text>
+        <rect class="payload payload-a" x="230" y="9" width="168" height="40" rx="3" />
+        <text class="payload-label" x="314" y="34" text-anchor="middle">payload(0, 1)</text>
+        <rect class="payload payload-a" x="460" y="9" width="168" height="40" rx="3" />
+        <text class="payload-label" x="544" y="34" text-anchor="middle">payload(1, 1)</text>
+        <rect class="payload payload-a" x="690" y="9" width="168" height="40" rx="3" />
+        <text class="payload-label" x="774" y="34" text-anchor="middle">payload(4, 1)</text>
+        <text class="row-brace" x="930" y="35" text-anchor="middle">同一 ID 1</text>
+      </g>
+
+      <g transform="translate(38 248)">
+        <rect class="page-row page-row-muted" width="1004" height="46" rx="4" />
+        <text class="page-id" x="90" y="30" text-anchor="middle">逻辑 Page …</text>
+        <text class="ellipsis" x="544" y="32" text-anchor="middle">…</text>
+      </g>
+    </g>
+
+    <g transform="translate(20 365)">
+      <rect class="group-box group-b" width="1080" height="205" rx="6" />
+      <text class="group-title" x="24" y="36">Full-attention pool</text>
+      <text class="group-note" x="24" y="61">另一套独立 page IDs；示例层为 Layer 3 / 7</text>
+
+      <text class="matrix-head" x="455" y="88" text-anchor="middle">Layer 3 payload</text>
+      <text class="matrix-head" x="705" y="88" text-anchor="middle">Layer 7 payload</text>
+
+      <g transform="translate(38 105)">
+        <rect class="page-row" width="1004" height="58" rx="4" />
+        <text class="page-id" x="90" y="35" text-anchor="middle">逻辑 Page 0</text>
+        <rect class="payload payload-b" x="300" y="9" width="210" height="40" rx="3" />
+        <text class="payload-label" x="405" y="34" text-anchor="middle">payload(3, 0)</text>
+        <rect class="payload payload-b" x="550" y="9" width="210" height="40" rx="3" />
+        <text class="payload-label" x="655" y="34" text-anchor="middle">payload(7, 0)</text>
+        <text class="row-brace" x="900" y="35" text-anchor="middle">同一 ID 0</text>
+      </g>
+    </g>
+  </svg>
+  <p class="figure-note">按逻辑 page 观察时，每一行才是一个完整 page：page ID 只分配一次，并共同标识该 pool 中各层对应的 payload。不同 pool 各自维护独立的 page ID 空间和生命周期。</p>
+</figure>
+<h3 id="cache-location-layer">cache location 只分配一次，不包含 layer 维</h3>
+<p class="evidence-summary"><strong>简要：</strong>SGLang 对请求位置只保存一份逻辑 cache location，映射表没有 layer 轴。</p>
+<details class="evidence-details">
+  <summary>展开说明与源码证明（1 处）</summary>
+
+<p>decode 时 SGLang 只产生一份 <code>out_cache_loc</code>，并写入二维 <code>req_to_token</code> 表。该表的维度是 request × token position，没有 layer 维。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/sglang/python/sglang/srt/mem_cache/allocation.py:691-718</code>；<code>sources/sglang/python/sglang/srt/mem_cache/memory_pool.py:414-429</code></div>
+  <pre><code class="language-python">if _alloc_page_size(batch) == 1:
+    out_cache_loc = alloc_token_slots(batch.tree_cache, bs * token_per_req)
+else:
+    last_loc = batch.req_to_token_pool.req_to_token[
+        batch.req_pool_indices, seq_lens_gpu - 1
+    ]
+    seq_lens_next = seq_lens_gpu + token_per_req
+<span class="explanation-comment">    # 【说明】只分配一份逻辑 cache location/page location。</span>
+    out_cache_loc = alloc_paged_token_slots_decode(
+        tree_cache=batch.tree_cache,
+        seq_lens=seq_lens_next,
+        seq_lens_cpu=batch.seq_lens_cpu + token_per_req,
+        last_loc=last_loc,
+        token_per_req=token_per_req,
+        req_pool_indices=batch.req_pool_indices,
+        batch=batch,
+    )
+
+<span class="explanation-comment"># 【说明】同一 location 被记录到 request-token 映射中，不按 layer 复制表。</span>
+batch.req_to_token_pool.write(
+    (batch.req_pool_indices, locs), out_cache_loc.to(torch.int32)
+)
+</code></pre>
+</div>
+<pre><code class="language-python">self.size = size
+self._alloc_size = size + 1
+self.max_context_len = max_context_len
+self.device = device
+
+<span class="explanation-comment"># 【说明】shape 中没有 layer 轴。</span>
+self.req_to_token = torch.zeros(
+    (self._alloc_size, max_context_len), dtype=torch.int32, device=device
+)
+
+def write(self, indices, values):
+    self.req_to_token[indices] = values
+</code></pre>
+
+</details><h3 id="page-id-buffer">默认模式下，同一 page ID 分别索引各层 buffer</h3>
+<p class="evidence-summary"><strong>简要：</strong>默认模式物理上每层分 buffer，但各层用同一 page ID 定位对应 payload。</p>
+<details class="evidence-details">
+  <summary>展开说明与源码证明（2 处）</summary>
+
+<p>默认 MHA pool 的物理 buffer 是 per-layer 的。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/sglang/python/sglang/srt/mem_cache/memory_pool.py:2662-2673, 2746-2754</code></div>
+  <pre><code class="language-python">def _kv_buffer_shapes(self):
+    if self.use_hnd:
+        return (
+            (self.num_pages, self.head_num, self.page_size, self.head_dim),
+            (self.num_pages, self.head_num, self.page_size, self.v_head_dim),
+        )
+    rows = self.size + self.page_size
+    return (
+        (rows, self.head_num, self.head_dim),
+        (rows, self.head_num, self.v_head_dim),
+    )
+
+<span class="explanation-comment"># 【说明】每层拥有独立物理 K/V tensor。</span>
+self.k_buffer = [_zeros(k_shape) for _ in range(self.layer_num)]
+self.v_buffer = [_zeros(v_shape) for _ in range(self.layer_num)]
+</code></pre>
+</div>
+<p>但写入时，代码先按 <code>layer_id</code> 选择物理 buffer，再用所有层共同使用的 <code>loc</code> 选择 page 和 page 内 offset。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/sglang/python/sglang/srt/mem_cache/memory_pool.py:3093-3116</code></div>
+  <pre><code class="language-python">if self.use_hnd:
+<span class="explanation-comment">    # 【说明】先选择当前层的独立物理 buffer。</span>
+    k_buf = self.k_buffer[layer_id - self.start_layer]
+    v_buf = self.v_buffer[layer_id - self.start_layer]
+
+<span class="explanation-comment">    # 【说明】loc/page ID 本身没有 layer 维，各层使用同一个 loc。</span>
+    pages = loc // self.page_size
+    offs = loc % self.page_size
+
+<span class="explanation-comment">    # 【说明】相同 pages/offs 分别写入当前层 buffer。</span>
+    k_buf[pages, :, offs, :] = cache_k
+    v_buf[pages, :, offs, :] = cache_v
+    return
+
+self._store_kv_layer(layer_id - self.start_layer, loc, cache_k, cache_v)
+</code></pre>
+</div>
+<p>因此，默认模式下一个逻辑 page <code>p</code> 应理解为：</p>
+<pre><code class="language-text">logical page p
+= {
+    k_buffer[layer 0][p], v_buffer[layer 0][p],
+    k_buffer[layer 1][p], v_buffer[layer 1][p],
+    ...
+  }
+</code></pre>
+<p>这些 payload 物理上分散，但 page ID 是 pool-level 的，不是每层独立分配的 page ID。</p>
+<hr />
+
+</details><h2 id="sglang-unified-memory-page">SGLang unified memory：逻辑 page 不变，只改变填充方式</h2>
+<h3 id="unified-entry-payload">unified entry 直接包含多层 payload</h3>
+<p class="evidence-summary"><strong>简要：</strong>unified 模式把同一 slot 下多个 layer 的 rows 放入一个 entry。</p>
+<details class="evidence-details">
+  <summary>展开说明与源码证明（1 处）</summary>
+
+<p>unified MHA layout 将同一 slot 的所有 layer rows 放进一个 entry。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/sglang/python/sglang/srt/mem_cache/kv/layout/mha.py:99-162</code></div>
+  <pre><code class="language-python">def k_row_bytes(self) -&gt; int:
+    return self.head_num * self.head_dim * self.store_dtype.itemsize
+
+def v_row_bytes(self) -&gt; int:
+    return self.head_num * self.v_head_dim * self.store_dtype.itemsize
+
+def host_entry_bytes(self) -&gt; int:
+<span class="explanation-comment">    # 【说明】一个 slot entry 的大小直接乘以 layer_num。</span>
+    return self.layer_num * (self.k_row_bytes() + self.v_row_bytes())
+
+def page_bytes(self, page_size: int) -&gt; int:
+<span class="explanation-comment">    # 【说明】一个逻辑 page 是 page_size 个 multi-layer entries。</span>
+    return page_size * self.entry_bytes()
+
+def _target_parts(self):
+    layer_stride = self.k_row_bytes() + self.v_row_bytes()
+    parts = (
+        DensePart(
+            name=&quot;k&quot;,
+            offset_bytes=0,
+            layer_stride_bytes=layer_stride,
+            layer_num=self.layer_num,
+            row_shape=(self.head_num, self.head_dim),
+            dtype=self.store_dtype,
+        ),
+        DensePart(
+            name=&quot;v&quot;,
+            offset_bytes=self.k_row_bytes(),
+            layer_stride_bytes=layer_stride,
+            layer_num=self.layer_num,
+            row_shape=(self.head_num, self.v_head_dim),
+            dtype=self.store_dtype,
+        ),
+    )
+    return parts
+</code></pre>
+</div>
+<p>物理填充形式为：</p>
+<pre><code class="language-text">entry 0 = [K0 | V0 | K1 | V1 | K2 | V2 | ...]
+entry 1 = [K0 | V0 | K1 | V1 | K2 | V2 | ...]
+...
+
+logical page p = page_size 个这样的 entries
+</code></pre>
+
+</details><h3 id="default-unified-page">default 与 unified 的逻辑 page 没有本质区别</h3>
+<p>假设 pool 中有 A、B、C 三层：</p>
+<pre><code class="language-text">logical page 0 = {A0, B0, C0}
+logical page 1 = {A1, B1, C1}
+</code></pre>
+<p>默认模式的填充方式：</p>
+<pre><code class="language-text">A buffer: A0, A1, A2, ...
+B buffer: B0, B1, B2, ...
+C buffer: C0, C1, C2, ...
+</code></pre>
+<p>unified 的填充方式：</p>
+<pre><code class="language-text">entry/page 0: A0, B0, C0
+entry/page 1: A1, B1, C1
+entry/page 2: A2, B2, C2
+</code></pre>
+<p>因此：</p>
+<pre><code class="language-text">default：相同逻辑 page 的多层 payload 物理分散。
+unified：相同逻辑 page 的多层 payload 物理打包。
+
+逻辑 page ID 的多层含义不变。
+</code></pre>
+<hr />
+<h2 id="hybrid-logical-blockpage">Hybrid 模型中 logical block/page 覆盖哪些层</h2>
+<p>Hybrid 不会改变 logical block/page 的基本定义，只会改变它覆盖的 layer 集合。</p>
+<h3 id="vllm">vLLM</h3>
+<p>一个 logical block 覆盖当前 <code>kv_cache_group</code> 中的层：</p>
+<pre><code class="language-text">group G 的 logical block b
+= G 中所有层在 b 位置的 cache payload
+</code></pre>
+<p>如果模型被划分为多个 cache groups，则每个 group 有自己的 block table/manager 视角。<code>block-outer</code> 与 <code>layer-outer</code> 不改变 group 边界，也不改变 block 的逻辑匹配含义。</p>
+<h3 id="sglang">SGLang</h3>
+<p>默认模式按实际 pool 管理 layer cache；unified memory 按 sub-pool/band 组织，例如 full attention、某个 window 长度或 recurrent state。</p>
+<pre><code class="language-text">sub-pool P 的 logical page p
+= P 中所有层在 p 位置的 cache payload
+</code></pre>
+<p>不同 sub-pool 的 payload 不需要混进同一个 page envelope。Hybrid 主要决定 layer 被路由到哪个 pool/sub-pool。</p>
+<hr />
+<h2 id="logical-blockpage">驱逐粒度：能否只驱逐 logical block/page 中的部分层</h2>
+<h3 id="section-1">先给结论</h3>
+<div class="eviction-conclusion"><table>
+<thead>
+<tr>
+<th>框架与模式</th>
+<th>当前驱逐单位</th>
+<th>能否只驱逐其中部分层</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>vLLM</td>
+<td>一个 cache-group-level <code>KVCacheBlock</code></td>
+<td><strong>不能在 block 内选层</strong>。这个 block 覆盖 group 中多少层，就一起逻辑失效多少层</td>
+</tr>
+<tr>
+<td>SGLang 默认 <code>RadixCache</code></td>
+<td>一组统一的 loc/page IDs</td>
+<td><strong>不能在同一 pool page 内选层</strong>。释放 ID 后，该 ID 在 pool 各层上的 payload 一起失去逻辑所有权</td>
+</tr>
+<tr>
+<td>SGLang unified cache</td>
+<td>一个 tree component 对应的 sub-pool unit/page</td>
+<td><strong>可以按 component/sub-pool 分开驱逐</strong>，因此 Full、不同 SWA window、Mamba state 可以分别回收；但<strong>不能在同一个 sub-pool 内任意选择单层</strong></td>
+</tr>
+</tbody>
+</table></div>
+<p>两种“部分层”：</p>
+<pre><code class="language-text">支持：驱逐一个独立 group/component 所包含的整组层，保留其他 sub-pool。
+不支持：在同一个 logical block/page/sub-pool unit 内，只驱逐 layer A，保留 layer B。
+</code></pre>
+<h3 id="section-2">驱逐边界覆盖的层集合本身也可能不连续</h3>
+<p>部分层驱逐还有一个容易忽略的问题：vLLM 的 group 和 SGLang 的 sub-pool 都不等价于“模型中一段连续层”。因此，当前按 group/sub-pool 驱逐时，一次失效的可能是一组分散在模型深度不同位置的层。</p>
+<p>仍以 <code>3 SWA + 1 Full</code> 重复两次为例：</p>
+<pre><code class="language-text">模型层顺序：
+layer id: 0   1   2   3  | 4   5   6   7
+type:     S0  S1  S2  F0 | S3  S4  S5  F1
+</code></pre>
+<h4 id="vllm-pattern-groups">vLLM：按 pattern 位置拆成多个 groups</h4>
+<p class="evidence-summary"><strong>简要：</strong>vLLM 的 group 可能覆盖模型深度上不连续的层，当前最细驱逐边界仍是 group block。</p>
+<details class="evidence-details">
+  <summary>展开说明和源码证明（3 处）</summary>
+  <div class="evidence-content">
+
+<p>vLLM 先形成同类型 layer bucket，再使用 <code>layers[i::num_groups]</code> 步进取层，而不是按连续模型层区间切分。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/core/kv_cache_planning.py:466-520</code></div>
+  <pre><code class="language-python">layer_buckets = [list(bucket) for bucket in _bucket_layers(layer_configs)]
+...
+grouped_layers = []
+for layers in layer_buckets:
+    num_groups = cdiv(len(layers), group_size)
+    for i in range(num_groups):
+<span class="explanation-comment">        # 【说明】跨 pattern repeat 取同一位置的层，不是连续切片。</span>
+        grouped_layers.append(layers[i::num_groups])
+
+return [
+    KVCacheGroup.from_layers({name: layer_configs[name] for name in names})
+    for names in grouped_layers
+]
+</code></pre>
+</div>
+<p>这个例子通常形成：</p>
+<pre><code class="language-text">SWA group A = [0, 4]
+SWA group B = [1, 5]
+SWA group C = [2, 6]
+Full group  = [3, 7]
+</code></pre>
+<p>具体 group ID 顺序由实际 bucket/config 决定，不能仅凭类型假定编号。驱逐 group A 的某个 logical block 时，一起失效的是 layer 0 和 layer 4 在该 block 上的 payload，而不是模型中的连续层 0～4。</p>
+<p>不同 groups 的 cache hash 包含各自的 <code>group_id</code>，所以它们的 block 可以独立被驱逐：</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/core/kv_cache_utils.py:58-67</code></div>
+  <pre><code class="language-python">def make_block_hash_with_group_id(
+    block_hash: BlockHash, group_id: int
+) -&gt; BlockHashWithGroupId:
+<span class="explanation-comment">    # 【说明】相同 token hash 在不同 group 下是不同 cache key。</span>
+    return BlockHashWithGroupId(block_hash + group_id.to_bytes(4, &quot;big&quot;, signed=False))
+</code></pre>
+</div>
+<p>但是相同 manager policy 的多个 groups 在命中时会联合查询，任一 group 缺失就返回 miss：</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/vllm/vllm/v1/core/block_pool.py:175-201</code></div>
+  <pre><code class="language-python">def get_cached_block(
+    self, block_hash: BlockHash, kv_cache_group_ids: list[int]
+) -&gt; list[KVCacheBlock] | None:
+    cached_blocks = []
+    for group_id in kv_cache_group_ids:
+        block_hash_with_group_id = make_block_hash_with_group_id(
+            block_hash, group_id
+        )
+        block = self.cached_block_hash_to_block.get_one_block(
+            block_hash_with_group_id
+        )
+<span class="explanation-comment">        # 【说明】只要其中一个 group 的 block 已驱逐，联合命中失败。</span>
+        if not block:
+            return None
+        cached_blocks.append(block)
+    return cached_blocks
+</code></pre>
+</div>
+<p>因此 vLLM 可以只驱逐某个 group 的 block，其他 group 的 block 仍可能保留；但缺少任一相关 group 后，保留下来的 blocks 通常不能单独形成完整 prefix hit。要获得真正的任意 layer 级驱逐，仍需把 cache key、validity 和命中判断继续下沉到 layer/subgroup 维度。</p>
+
+  </div>
+</details><h4 id="sglang-lifetimewindow-sub-pool">SGLang：按 lifetime/window 汇总为较大的 sub-pool</h4>
+<p class="evidence-summary"><strong>简要：</strong>SGLang 的 sub-pool 可能汇总不连续层，当前最细边界仍是 sub-pool page/unit。</p>
+<details class="evidence-details">
+  <summary>展开说明和源码证明（2 处）</summary>
+  <div class="evidence-content">
+
+<p>SGLang unified planner 按 <code>(lifetime, allocation unit)</code> 建组，并把具有相同 geometry 的实际 <code>layer_id</code> 追加进去，同样没有要求 layer ID 连续。</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/sglang/python/sglang/srt/mem_cache/kv/plan.py:432-453</code></div>
+  <pre><code class="language-python">_Groups = Dict[Tuple[KVLifetime, int], List[Tuple[PartGeometry, List[int]]]]
+
+def _group_parts(decls: Sequence[KVLayerDecl], page_size: int) -&gt; _Groups:
+    groups: _Groups = {}
+    for decl in decls:
+        for part in decl.parts:
+            key = (part.lifetime, _unit(part.lifetime, page_size))
+            entries = groups.setdefault(key, [])
+            for geometry, layer_ids in entries:
+                if geometry == part.geometry:
+<span class="explanation-comment">                    # 【说明】直接追加实际 model layer_id，没有连续性检查。</span>
+                    layer_ids.append(decl.layer_id)
+                    break
+            else:
+                entries.append((part.geometry, [decl.layer_id]))
+    ...
+    return groups
+</code></pre>
+</div>
+<p>收集结果直接写入 <code>PlannedSubPool.layer_ids</code>：</p>
+<div class="source-proof">
+  <div class="source-path"><code>sources/sglang/python/sglang/srt/mem_cache/kv/plan.py:713-752</code></div>
+  <pre><code class="language-python">sub_pools.append(
+    PlannedSubPool(
+        name=name,
+        lifetime=lifetime,
+        unit=unit,
+<span class="explanation-comment">        # 【说明】这个 sub-pool unit/page 共同覆盖的实际层集合。</span>
+        layer_ids=tuple(layer_ids),
+        geometry=geometry,
+        spec=spec,
+        parts=parts,
+        ...
+    )
+)
+</code></pre>
+</div>
+<p>如果所有 SWA 层具有相同 window 和 geometry，上述例子通常是：</p>
+<pre><code class="language-text">SWA/window sub-pool = [0, 1, 2, 4, 5, 6]
+Full sub-pool       = [3, 7]
+</code></pre>
+<p>这与 vLLM 的 pattern-position groups 不同：SGLang 通常把相同 lifetime/window 的层汇总进一个更大的 sub-pool。因此驱逐一个 SWA logical page/unit，会一起失效 layer 0、1、2、4、5、6 对应的 payload；它们同样不是一个连续模型层区间。</p>
+<pre><code class="language-text">vLLM 最细现有边界：一个 pattern-position cache group 的 block。
+SGLang unified 最细现有边界：一个 lifetime/window sub-pool 的 page/unit。
+
+二者都不能在这些边界内部再任选某个 layer 驱逐。
+</code></pre>
+<p>物理上是否连续不会改变上述结论：block-outer/unified entry 可以把非连续模型层的 payload 相邻打包；layer-outer/default per-layer buffer 可以让它们物理分散。驱逐能力取决于 metadata、ID 和 ownership 的边界，不取决于能否定位某一层的内存 slice。</p>
+<hr />
+
+  </div>
+</details><h2 id="section-3">最终对比</h2>
+<table>
+<thead>
+<tr>
+<th>问题</th>
+<th>vLLM</th>
+<th>SGLang</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td>逻辑匹配编号属于谁</td>
+<td>cache group</td>
+<td>pool/sub-pool</td>
+</tr>
+<tr>
+<td>是否为每层独立分配逻辑编号</td>
+<td>否</td>
+<td>否；同一 pool 内各层共同使用 loc/page ID</td>
+</tr>
+<tr>
+<td>一个逻辑单位是否覆盖多层 payload</td>
+<td>是，覆盖 group 中的层</td>
+<td>是，覆盖 pool/sub-pool 中的层</td>
+</tr>
+<tr>
+<td>layer-specific 的是什么</td>
+<td>物理 cache view/payload</td>
+<td>物理 buffer 或 unified entry offset</td>
+</tr>
+<tr>
+<td>layout 改变什么</td>
+<td><code>[Block, Layer]</code> 与 <code>[Layer, Block]</code> 的展开顺序</td>
+<td>per-layer buffer 与 multi-layer entry 的填充方式</td>
+</tr>
+<tr>
+<td>layout 是否改变逻辑匹配单位</td>
+<td>否</td>
+<td>否</td>
+</tr>
+<tr>
+<td>最细的现有驱逐边界</td>
+<td>cache group 的 logical block</td>
+<td>默认模式为 pool page；unified 为 component/sub-pool unit</td>
+</tr>
+<tr>
+<td>能否在一个逻辑单位内部任选单层驱逐</td>
+<td>否</td>
+<td>否；unified 只能先按独立 sub-pool/component 拆开</td>
+</tr>
+</tbody>
+</table>
+<p>一句话总结：</p>
+<blockquote>
+<p>vLLM 的 block-outer/layer-outer，以及 SGLang 的 default/unified，核心差异都是多层 cache payload 的物理填充方式；用于匹配和索引的 logical block/page 仍然是 group 或 pool 级对象，而不是 per-layer 独立对象。</p>
+</blockquote>
+<hr />
+<h2 id="section-4">官方资料与源码索引</h2>
+<h3 id="section-5">官方说明</h3>
+<ul>
+<li><a href="https://github.com/vllm-project/vllm/blob/902364d152ff5cc204addd049c217e3bd68cc2fe/docs/design/hybrid_kv_cache_manager.md">vLLM Hybrid KV Cache Manager</a></li>
+<li><a href="https://github.com/sgl-project/sglang/blob/47361c57be9fcc23f11b9804633bfcfe9342f98e/docs/docs/advanced_features/unified_memory.mdx">SGLang Unified Memory for Hybrid Models</a></li>
+</ul>
+<h3 id="vllm-1">vLLM 关键源码</h3>
+<ul>
+<li><code>sources/vllm/vllm/v1/core/kv_cache_coordinator.py</code>：每个 cache group 创建一个 manager。</li>
+<li><code>sources/vllm/vllm/v1/core/single_type_kv_cache_manager.py</code>：group manager 分配 logical blocks。</li>
+<li><code>sources/vllm/vllm/v1/core/block_pool.py</code>：唯一的一维 <code>KVCacheBlock</code> 对象池。</li>
+<li><code>sources/vllm/vllm/v1/core/kv_cache_manager.py</code>：按 block ID 驱逐的公开入口。</li>
+<li><code>sources/vllm/vllm/v1/worker/gpu/attn_utils.py</code>：同一 group mapping 展开给所有 layer。</li>
+<li><code>sources/vllm/vllm/v1/kv_cache_layout.py</code>：block-outer/layer-outer 的 L/B 展开顺序。</li>
+<li><code>sources/vllm/vllm/v1/kv_cache_interface.py</code>：共享 backing 上的 layer/block views。</li>
+</ul>
+<h3 id="sglang-1">SGLang 关键源码</h3>
+<ul>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/allocation.py</code>：统一 cache location/page location 的分配。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/memory_pool.py</code>：默认 per-layer buffers 使用相同 loc/page ID。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/kv/layout/mha.py</code>：unified multi-layer entry/page 定义与写入。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/layout/token_major.py</code>：unified entry 上的 per-layer strided views。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/radix_cache.py</code>：默认模式按统一 loc/page indices 驱逐。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/allocator/paged.py</code>：把 locations 还原成 page IDs 并释放。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/unified_radix_cache.py</code>：unified cache 按 component 路由驱逐。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/unified_cache/components/</code>：Full、SWA、Mamba component 的独立释放动作。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/kv/plan.py</code>：sub-pool 与其 <code>layer_ids</code> 的规划结构。</li>
+<li><code>sources/sglang/python/sglang/srt/mem_cache/kv/storage.py</code>：最终以 <code>sub_pool + unit IDs</code> 为粒度释放。</li>
+</ul>
+<p>以上结论固定于文首两个 commit。后续版本若修改 cache group、pool 或 unified-memory 实现，需要重新核对相关代码。</p>
+
+
+    <p class="footer-note">代码块来自正文所标注的本地源码路径。代码中的“【说明】”为报告添加的解释，不是上游源码注释。</p>
+  </main>
+</body>
+</html>
